@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.10)
+
+# Set the project name
+project(aixd)
+
+
+if (NOT DEFINED ENV{COMMON_DIR})
+	message(FATAL_ERROR "Please set COMMON_DIR first")
+else()
+	message(STATUS "COMMON_DIR is $ENV{COMMON_DIR}")
+endif()
+set(CMAKE_FIND_ROOT_PATH $ENV{COMMON_DIR})
+list(APPEND CMAKE_PREFIX_PATH $ENV{COMMON_DIR})
+
+# Specify the C++ standard
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
+add_link_options("LINKER:-rpath-link,$ENV{COMMON_DIR}/lib")
+
+find_package(spdlog REQUIRED)
+find_package(lcm REQUIRED)
+# Include directories
+include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(src)
+include_directories(include)
+
+# Add the executable
+add_executable(aixd src/ai.cpp src/rksound.cpp)
+
+# Link libraries
+link_directories($ENV{COMMON_DIR}/lib)
+# lcm
+target_link_libraries(${PROJECT_NAME} lcm)
+# pthread
+target_link_libraries(${PROJECT_NAME} pthread)
+# ssl
+target_link_libraries(${PROJECT_NAME} ssl)
+target_link_libraries(${PROJECT_NAME} crypto)
+# portaudio
+target_link_libraries(${PROJECT_NAME} $ENV{COMMON_DIR}/lib/libportaudio.a)
+# alsa
+target_link_libraries(${PROJECT_NAME} asound)
