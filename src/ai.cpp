@@ -390,6 +390,47 @@ struct HuoshanProto
     }
 };
 
+class LocalCmd
+{
+    std::string function;
+    std::string params;
+};
+class LocalAction
+{
+public:
+    std::string name;
+    std::vector<std::string> patterns;
+    LocalCmd cmd;
+    std::vector<std::string> replys;
+
+public:
+    bool Match(std::string tts)
+    {
+
+    }
+};
+
+class LocalAi
+{
+    std::vector<LocalAction> actions;
+public:
+    bool LoadAction()
+    {
+
+    }
+    bool MatchAction(std::string tts)
+    {
+        for(auto & action : actions)
+        {
+            if(action.Match(tts))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
 
 /**
  * @brief  音频录制回调
@@ -421,6 +462,7 @@ int record_callback(const void* inputBuffer, void* outputBuffer, unsigned long f
     return 0;
 }
 
+#if 1
 int main(int argc, char *argv[])
 {
     rksound_play_open(8000, paFloat32, 320, 1, NULL, NULL);
@@ -462,6 +504,14 @@ int main(int argc, char *argv[])
         if(h.optional.event == Event::SessionStarted)
         {
             connection->send(huoshan.SayHello("你好，我是晓堤，很高兴认识你"));
+        }
+        if(h.optional.event == Event::TTSSentenceStart)
+        {
+
+        }
+        if(h.optional.event == Event::TTSSentenceEnd)
+        {
+
         }
     };
 
@@ -507,3 +557,22 @@ int main(int argc, char *argv[])
 
     client.start();
 }
+#else
+#endif
+
+
+/*
+[
+    {
+        "name":"记住当前地点",
+        "patterns":"["",""]",
+        "cmd":{
+            "function":"",
+            "param":"{}"
+        },
+        "replys":["",""]
+    }
+]
+
+
+*/

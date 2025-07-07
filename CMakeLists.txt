@@ -17,9 +17,22 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 add_link_options("LINKER:-rpath-link,$ENV{COMMON_DIR}/lib")
 
-find_package(spdlog REQUIRED)
-find_package(lcm REQUIRED)
+add_compile_options(-g -Wall -Wextra 
+                    -Wuninitialized 
+                    -Wmaybe-uninitialized
+                    -fno-omit-frame-pointer)
+add_compile_options(
+                    -DISP_HW_V30 -DRKPLATFORM=ON -DARCH64=OFF
+                    -DUAPI2
+                    -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64 
+                    )
+add_compile_options(-O0)
+
+#find_package(spdlog REQUIRED)
+#find_package(lcm REQUIRED)
+find_package(PortAudio REQUIRED)
 # Include directories
+include_directories($ENV{COMMON_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(src)
 include_directories(include)
@@ -28,9 +41,8 @@ include_directories(include)
 add_executable(aixd src/ai.cpp src/rksound.cpp)
 
 # Link libraries
-link_directories($ENV{COMMON_DIR}/lib)
 # lcm
-target_link_libraries(${PROJECT_NAME} lcm)
+#target_link_libraries(${PROJECT_NAME} lcm)
 # pthread
 target_link_libraries(${PROJECT_NAME} pthread)
 # ssl
@@ -39,4 +51,4 @@ target_link_libraries(${PROJECT_NAME} crypto)
 # portaudio
 target_link_libraries(${PROJECT_NAME} $ENV{COMMON_DIR}/lib/libportaudio.a)
 # alsa
-target_link_libraries(${PROJECT_NAME} asound)
+#target_link_libraries(${PROJECT_NAME} asound)

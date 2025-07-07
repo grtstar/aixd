@@ -21,6 +21,25 @@ void rksound_init()
         printf("初始化 PortAudio 失败：%s\n", Pa_GetErrorText(err));
         return;
     }
+
+    int numDevices = Pa_GetDeviceCount();
+    if(numDevices <= 0) {
+        printf("错误：Pa_CountDevices 返回 0x%x\n", numDevices);
+    }
+    else
+    {
+        const PaDeviceInfo *deviceInfo;
+        for(int i=0; i<numDevices; i++) {
+            deviceInfo = Pa_GetDeviceInfo(i);
+            // 处理设备信息
+            printf("设备 %d: %s\n", i, deviceInfo->name);
+            printf("  输入通道数：%d\n", deviceInfo->maxInputChannels);
+            printf("  输出通道数：%d\n", deviceInfo->maxOutputChannels);
+            printf("  默认输入延迟：%f 秒\n", deviceInfo->defaultLowInputLatency);
+            printf("  默认输出延迟：%f 秒\n", deviceInfo->defaultLowOutputLatency);
+            printf("  默认采样率：%f Hz\n", deviceInfo->defaultSampleRate);
+        }
+    }
     rk_sound.pa_initialized = true;
 }
 
@@ -32,7 +51,10 @@ void rksound_record_open(int sample_rate, uint32_t sample_format, int frames_per
     input_params.device = 1;
     input_params.channelCount = channels;
     input_params.sampleFormat = sample_format;
-    input_params.suggestedLatency = Pa_GetDeviceInfo(input_params.device)->defaultLowInputLatency;
+    if(Pa_GetDeviceInfo(input_params.device))
+    {
+        input_params.suggestedLatency = Pa_GetDeviceInfo(input_params.device)->defaultLowInputLatency;
+    }
     input_params.hostApiSpecificStreamInfo = NULL;
     printf("打开录音设备\n");
     err = Pa_OpenStream(&rk_sound.record_stream, &input_params, NULL, sample_rate, frames_per_buffer, paClipOff, callback, userdata);
@@ -67,19 +89,27 @@ void rksound_record_close()
 void rksound_play_open(int sample_rate, uint32_t sample_format, int frames_per_buffer, int channels, audioCallback callback, void* userdata)
 {
     rksound_init();
+    printf("33333333333333\n");
+
     PaError err;
     PaStreamParameters output_params;
     output_params.device = Pa_GetDefaultOutputDevice();
+    printf("4444444444444444\n");
     output_params.channelCount = channels;
     output_params.sampleFormat = sample_format; // paInt16, paFloat32, etc.
-    output_params.suggestedLatency = Pa_GetDeviceInfo(output_params.device)->defaultLowOutputLatency;
+    if(Pa_GetDeviceInfo(output_params.device))
+    {
+        output_params.suggestedLatency = Pa_GetDeviceInfo(output_params.device)->defaultLowOutputLatency;
+    }
     output_params.hostApiSpecificStreamInfo = NULL;
+    printf("4444444444444444\n");
 
     err = Pa_OpenStream(&rk_sound.playback_stream, NULL, &output_params, sample_rate, frames_per_buffer, paClipOff, callback, userdata);
     if (err != paNoError) {
         printf("打开播放设备失败：%s\n", Pa_GetErrorText(err));
         return;
     }
+    printf("555555555555555\n");
 
     err = Pa_StartStream(rk_sound.playback_stream);
     if (err != paNoError) {
