@@ -2,6 +2,12 @@
 #include <mutex>
 #include <thread>
 #include <chrono> 
+#include <regex> 
+#include <fstream>
+#include <lcm/lcm-cpp.hpp>
+#include <lcm/lcm.h>
+#include "log_.h"
+#include <mars_message/String.hpp>
 #define SIMPLEWEB_USE_STANDALONE_ASIO 1
 #define ASIO_USE_TS_EXECUTOR_AS_DEFAULT  1
 #include "simpleweb/wss_client.hpp"
@@ -11,6 +17,7 @@
 using SimpleWeb::WssClient;
 using namespace std;
 
+#define TAG "AIXD"
 
 enum MessageType
 {
@@ -81,8 +88,8 @@ std::string huoshan_session = R"(
         }
     },
     "dialog": {
-        "bot_name": "晓堤",
-        "system_role": "你是一个超有智能的扫地机器人，你还会照顾宠物，帮小学生写作业，你使用活泼灵动的女声，性格开朗，热爱生活。我叫了你的名字后你才开始回应我",
+        "bot_name": "小缘",
+        "system_role": "你是一个超有智能的管家机器人，你还会照顾宠物，帮小学生写作业，你使用活泼灵动的女声，性格开朗，热爱生活。我叫了你的名字后你才开始回应我",
         "speaking_style": "你的说话风格简洁明了，语速适中，语调自然。",
         "extra": {
             "strict_audit": false
@@ -147,9 +154,18 @@ struct HuoshanProto
     std::string session_id;
     bool is_ready = false;
     int play_idle = 0;
+    bool disabled_remote = false;
+    std::string prompt;
+    std::string hello;
     HuoshanProto()
     {
-        session_id = "123456789";
+
+    }
+    HuoshanProto(std::string session_id, std::string prompt, std::string hello)
+    {
+        this->session_id = session_id;
+        this->prompt = prompt;
+        this->hello = hello;
     }
 
     std::string genrate_header(uint8_t version = 0x1, 
@@ -167,16 +183,10 @@ struct HuoshanProto
         header.compression = compression;
         std::string buffer;
         uint8_t *d = (uint8_t *)&header;
-        for(int i=0; i<sizeof(Header); i++)
+        for(size_t i=0; i<sizeof(Header); i++)
         {
             buffer.push_back(d[i]);
         }
-        // printf("HS: header\n");
-        // for(int i=0; i<buffer.length(); i++)
-        // {
-        //     printf("[%02X] ", buffer[i]);
-        // }
-        // printf("\n");
         return buffer;
     }
 
@@ -207,7 +217,7 @@ struct HuoshanProto
         hp.header.message_flags = response[1] & 0x0F;
         hp.header.serialization = response[2] >> 4;
         hp.header.compression = response[2] & 0x0F;
-        printf("HS: len:%d, message_type: %X, serialization: %X, compression: %X\n", response.length(), hp.header.message_type, hp.header.serialization, hp.header.compression);
+        LOGD(TAG, "HS: len:{}, message_type: {}, serialization: {}, compression: {}", response.length(), (int)hp.header.message_type, (int)hp.header.serialization, (int)hp.header.compression);
         hp.header.reserved = response[3];
         auto op = &response[4];
         int start = 0;
@@ -229,7 +239,7 @@ struct HuoshanProto
                 {
                     is_ready = false;
                 }
-                printf("HS: event: %d\n", hp.optional.event);
+                LOGD(TAG, "HS: event: {}", hp.optional.event);
                 start += 4;
             }
             hp.session_id_size = from_byteb(&op[start]);
@@ -242,36 +252,52 @@ struct HuoshanProto
             if(hp.header.serialization == JSON)
             {
                 hp.payload += "\0";
-                printf("HS: payload: %s\n", hp.payload.c_str());
+                LOGD(TAG, "HS: payload: {}", hp.payload.c_str());
+            }
+            if(hp.optional.event == TTSSentenceStart)
+            {
+                if(disabled_remote)
+                {
+                    nlohmann::json json = nlohmann::json::parse(hp.payload);
+                    if(json["tts_type"] == "chat_tts_text")
+                    {
+                        disabled_remote = false;
+                        LOGD(TAG, "HS: enable remote");
+                    }
+                }
             }
             if(hp.header.message_type == AUDIO_ONLY_RSP)
             {
                 // printf("HS: audio: %d\n", hp.payload_size);
                 // Convert 24000Hz Float32 audio to 8000Hz by taking every third sample
-                std::vector<uint8_t> audio(hp.payload.size() / 4 / 3 * 4); // 24000Hz Float32 audio to 8000Hz Float32 audio
-                for(int i=0; i<audio.size(); i+=4)
+                
+                if(!disabled_remote)
                 {
-                    audio[i+0] = op[start + i * 3 + 0];
-                    audio[i+1] = op[start + i * 3 + 1];
-                    audio[i+2] = op[start + i * 3 + 2];
-                    audio[i+3] = op[start + i * 3 + 3];
+                    std::vector<uint8_t> audio(hp.payload.size() / 4 / 3 * 4); // 24000Hz Float32 audio to 8000Hz Float32 audio
+                    for(size_t i=0; i<audio.size(); i+=4)
+                    {
+                        audio[i+0] = op[start + i * 3 + 0];
+                        audio[i+1] = op[start + i * 3 + 1];
+                        audio[i+2] = op[start + i * 3 + 2];
+                        audio[i+3] = op[start + i * 3 + 3];
+                    }
+                    apool.add_audio(audio);
                 }
-                apool.add_audio(audio);
             }
         }
         else if(hp.header.message_type == ERROR_INFO)
         {
             hp.optional.code = from_byteb(&op[start]);
-            printf("HS: error: %d\n", hp.optional.code);
+            LOGD(TAG, "HS: error: {}", hp.optional.code);
             start += 4;
             hp.payload_size = from_byteb(&op[start]);
             start += sizeof(hp.payload_size);
-            printf("HS: payload_size: %d\n", hp.payload_size);
+            LOGD(TAG, "HS: payload_size: {}", hp.payload_size);
             hp.payload.insert(hp.payload.end(), &op[start], &op[start] + hp.payload_size);
             if(hp.header.serialization == JSON)
             {
                 hp.payload += "\0";
-                printf("HS: payload: %s\n", hp.payload.c_str());
+                LOGD(TAG, "HS: payload: {}", hp.payload.c_str());
             }
         }
         return hp;
@@ -279,22 +305,17 @@ struct HuoshanProto
 
     std::string StartConnect()
     {
-        printf("HS: StartConnect\n");
+        LOGD(TAG, "HS: StartConnect");
         auto d = genrate_header();
         d.append(to_bytesb(Event::StartConnect));
         std::string json = "{}";
         d.append(to_bytesb(json.length())); // payload size
         d.append(json); // payload
-        // for(int i=0; i<d.length(); i++)
-        // {
-        //     printf("[%02X] ", d[i]);
-        // }
-        // printf("\n");
         return d;
     }
     std::string FinishConnect()
     {
-        printf("HS: FinishConnect\n");
+        LOGD(TAG, "HS: FinishConnect");
         auto d = genrate_header();
         d.append(to_bytesb(Event::FinishConnection));
         std::string json = "{}";
@@ -305,20 +326,20 @@ struct HuoshanProto
     
     std::string StartSession()
     {
-        printf("HS: StartSession\n");
+        LOGD(TAG, "HS: StartSession");
         auto d = genrate_header();
         d += to_bytesb(Event::StartSession);
        
         d += to_bytesb(session_id.length());
         d += session_id;
         
-        d += to_bytesb(huoshan_session.length());
-        d += huoshan_session;
+        d += to_bytesb(prompt.length());
+        d += prompt;
         return d;
     }
     std::string TaskRequest(uint8_t* audio, int len)
     {
-        printf("HS: TaskRequest\n");
+        //printf("HS: TaskRequest\n");
         auto d = genrate_header(0x1, AUDIO_ONLY_REQ, MSG_WITH_EVENT, NO_SERIALIZATION);
         d += to_bytesb(Event::TaskRequest);
         
@@ -332,7 +353,7 @@ struct HuoshanProto
     }
     std::string FinishSession()
     {
-        printf("HS: FinishSession\n");
+        LOGD(TAG, "HS: FinishSession");
         auto d = genrate_header();
         auto opt = to_bytesb(Event::FinishSession);
         d.insert(d.end(), opt.begin(), opt.end());
@@ -347,10 +368,28 @@ struct HuoshanProto
         d.insert(d.end(), json.begin(), json.end()); // payload
         return d;
     }
+    std::string SayHello()
+    {
+        LOGD(TAG, "HS: SayHello");
+        auto d = genrate_header();
+        auto opt = to_bytesb(Event::SayHello);
+        d.insert(d.end(), opt.begin(), opt.end());
 
+        auto sid_size = to_bytesb(session_id.length());
+        d.insert(d.end(), sid_size.begin(), sid_size.end());
+        d.insert(d.end(), session_id.begin(), session_id.end());
+
+        nlohmann::json json;
+        json["content"] = hello;
+        std::string json_str = json.dump();
+        auto size_bytes = to_bytesb(json_str.size());
+        d.insert(d.end(), size_bytes.begin(), size_bytes.end()); // payload size
+        d.insert(d.end(), json_str.begin(), json_str.end()); // payload
+        return d;
+    }
     std::string SayHello(const std::string &content)
     {
-        printf("HS: SayHello\n");
+        LOGD(TAG, "HS: SayHello");
         auto d = genrate_header();
         auto opt = to_bytesb(Event::SayHello);
         d.insert(d.end(), opt.begin(), opt.end());
@@ -369,7 +408,7 @@ struct HuoshanProto
     }
     std::string ChatTTSText(const std::string &text, bool start, bool end)
     {
-        printf("HS: ChatTTSText\n");
+        LOGD(TAG, "HS: ChatTTSText: {}", text.c_str());
         auto d = genrate_header();
         auto opt = to_bytesb(Event::ChatTTSText);
         d.insert(d.end(), opt.begin(), opt.end());
@@ -392,8 +431,11 @@ struct HuoshanProto
 
 class LocalCmd
 {
+public:
     std::string function;
     std::string params;
+public:
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE(LocalCmd, function, params)
 };
 class LocalAction
 {
@@ -401,29 +443,19 @@ public:
     std::string name;
     std::vector<std::string> patterns;
     LocalCmd cmd;
-    std::vector<std::string> replys;
-
+    std::vector<std::string> replysp;
+    std::vector<std::string> replysn;
+public:
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE(LocalAction, name, patterns, cmd, replysp, replysn)
 public:
     bool Match(std::string tts)
     {
-
-    }
-};
-
-class LocalAi
-{
-    std::vector<LocalAction> actions;
-public:
-    bool LoadAction()
-    {
-
-    }
-    bool MatchAction(std::string tts)
-    {
-        for(auto & action : actions)
+        for(auto & pattern : patterns)
         {
-            if(action.Match(tts))
+            std::regex re(pattern);
+            if(std::regex_match(tts, re))
             {
+                LOGD("TAG", "Match {} with {}", tts.c_str(), pattern.c_str());
                 return true;
             }
         }
@@ -431,6 +463,75 @@ public:
     }
 };
 
+
+class AiConfigs
+{
+    nlohmann::json j;
+public:
+    AiConfigs(const std::string &path)
+    {
+        std::ifstream ifs(path);
+        if (ifs.good())
+        {
+            try
+            {
+                j = nlohmann::json::parse(ifs);
+            }
+            catch (const std::exception &e)
+            {
+                LOGE(TAG, "RCFG: {}", e.what());
+            }
+        }
+    }
+    nlohmann::json & GetJson()
+    {
+        return j;
+    }
+};
+class LocalAi
+{
+    std::vector<LocalAction> actions;
+public:
+    bool LoadAction(nlohmann::json & j)
+    {
+        try
+        {
+            for(auto & action : j["actions"])
+            {
+                LocalAction a;
+                a.name = action["name"];
+                a.patterns = action["patterns"].get<std::vector<std::string>>();
+                a.cmd.function = action["cmd"]["function"];
+                a.cmd.params = action["cmd"]["param"];
+                if(action.contains("replysp"))
+                    a.replysp = action["replysp"].get<std::vector<std::string>>();
+                if(action.contains("replysn"))
+                    a.replysn = action["replysn"].get<std::vector<std::string>>();
+                actions.push_back(a);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            LOGE("RCFG", "{}", e.what());
+            return false;
+        }
+        return true;
+    }
+    LocalAction MatchAction(std::string tts)
+    {
+        for(auto & action : actions)
+        {
+            if(action.Match(tts))
+            {
+                return action;
+            }
+        }
+        return LocalAction();
+    }
+};
+
+LocalAi local_ai;
+std::string last_asr;
 
 /**
  * @brief  音频录制回调
@@ -448,11 +549,11 @@ int record_callback(const void* inputBuffer, void* outputBuffer, unsigned long f
         // 取第四个通道的数据
         uint16_t * channel_data = (uint16_t*)malloc(framesPerBuffer * sizeof(uint16_t));
         if (channel_data == NULL) {
-            printf("内存分配失败\n");
+            LOGE(TAG, "内存分配失败");
             return 1;
         }
         const int channel_index = 3;
-        for(int i=0; i<framesPerBuffer; i++)
+        for(size_t i=0; i<framesPerBuffer; i++)
         {
             channel_data[i] = ((uint16_t*)inputBuffer)[i * 4 + channel_index];
         }
@@ -462,13 +563,41 @@ int record_callback(const void* inputBuffer, void* outputBuffer, unsigned long f
     return 0;
 }
 
+std::string RandReply(std::vector<std::string> replys)
+{
+    if(replys.empty())
+        return "";
+    int idx = rand() % replys.size();
+    return replys[idx];
+}
+
+std::string getCurrentTimestamp() {
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&time_t_now), "%Y-%m-%d %H:%M:%S");
+        return ss.str();
+    }
+
 #if 1
 int main(int argc, char *argv[])
 {
+    lcm::LCM lcm;
+
+    if (!lcm.good())
+    {
+        LOGE(TAG, "LCM no good");
+        return 1;
+    }
+
     rksound_play_open(8000, paFloat32, 320, 1, NULL, NULL);
     rksound_record_open(16000, paInt16, 320, 4, record_callback, NULL);
   
-    HuoshanProto huoshan;
+    AiConfigs ai_configs("localai.json");
+    
+    HuoshanProto huoshan(getCurrentTimestamp(), ai_configs.GetJson()["system"]["prompt"].dump(), ai_configs.GetJson()["system"]["hello"].get<std::string>());
+    local_ai.LoadAction(ai_configs.GetJson());
 
     std::thread t([&huoshan]()
     {
@@ -482,18 +611,19 @@ int main(int argc, char *argv[])
                 continue;
             }
             huoshan.play_idle = 0;
-            printf("Audio: play %d bytes\n", audio.size());
+            //printf("Audio: play %d bytes\n", audio.size());
             rksound_play_pcm(audio.data(), audio.size()/4);
         }
     });
 
     WssClient client("openspeech.bytedance.com/api/v3/realtime/dialogue", false);
+    client.auto_reconnect = true;
     client.config.header.insert({"X-Api-App-ID", "1279857841"});
     client.config.header.insert({"X-Api-Access-Key", "vqIUYu8VverjejYLroLhwlhH1VSk-XSY"});
     client.config.header.insert({"X-Api-Resource-Id", "volc.speech.dialog"});
     client.config.header.insert({"X-Api-App-Key", "PlgvMymc7f3tQnJ6"});
     client.config.header.insert({"X-Api-Connect-Id", "xdrobot"});
-    client.on_message = [&huoshan](shared_ptr<WssClient::Connection> connection, shared_ptr<WssClient::InMessage> in_message)
+    client.on_message = [&huoshan, &lcm](shared_ptr<WssClient::Connection> connection, shared_ptr<WssClient::InMessage> in_message)
     {
         //cout << "Client: Message received: \"" << in_message->string() << "\"" << endl;
         HuoshanProto h = huoshan.parse(in_message->string());
@@ -503,15 +633,58 @@ int main(int argc, char *argv[])
         }
         if(h.optional.event == Event::SessionStarted)
         {
-            connection->send(huoshan.SayHello("你好，我是晓堤，很高兴认识你"));
+            connection->send(huoshan.SayHello());
         }
-        if(h.optional.event == Event::TTSSentenceStart)
+        if(h.optional.event == Event::ASRResponse)
         {
-
+            last_asr = h.payload;
         }
-        if(h.optional.event == Event::TTSSentenceEnd)
+        if(h.optional.event == Event::ASREnded)
         {
-
+            try
+            {
+                nlohmann::json j = nlohmann::json::parse(last_asr);
+                std::string tts = j["extra"]["origin_text"];
+                LOGD(TAG, "ASR: {}", tts.c_str());
+                auto action = local_ai.MatchAction(tts);
+                if(!action.name.empty())
+                {
+                    mars_message::String msg, ret;
+                    msg.value = action.cmd.params;
+                    if(lcm.send(action.cmd.function, &msg, &ret, 500, 1) == 0)
+                    {
+                        if(ret.value != "")
+                        {
+                            connection->send(huoshan.ChatTTSText(ret.value, true, false));
+                            connection->send(huoshan.ChatTTSText("", false, true));
+                        }
+                        else
+                        {
+                            connection->send(huoshan.ChatTTSText(RandReply(action.replysp), true, false));
+                            connection->send(huoshan.ChatTTSText("", false, true));
+                        }
+                    }
+                    else
+                    {
+                        connection->send(huoshan.ChatTTSText(RandReply(action.replysn), true, false));
+                        connection->send(huoshan.ChatTTSText("", false, true));
+                    }
+                    huoshan.disabled_remote = true;
+                }
+            }
+            catch(const std::exception& e)
+            {
+                LOGE(TAG, "ASR Parse Error: {}", e.what());
+                LOGD(TAG, "ASR Raw Data: {}", last_asr.c_str());
+            }
+        }
+        if(h.optional.event == Event::TTSEnded)
+        {
+            if(huoshan.disabled_remote)
+            {
+                LOGD(TAG, "HS: TTS ended, reset remote");
+                huoshan.disabled_remote = false;
+            }
         }
     };
 
@@ -523,14 +696,15 @@ int main(int argc, char *argv[])
 
     client.on_close = [&huoshan](shared_ptr<WssClient::Connection> /*connection*/, int status, const string & /*reason*/)
     {
-        cout << "Client: Closed connection with status code " << status << endl;
+        LOGD(TAG, "Client: Closed connection with status code {}", status);
         huoshan.is_ready = false;
     };
 
     // See http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference.html, Error Codes for error code meanings
-    client.on_error = [](shared_ptr<WssClient::Connection> /*connection*/, const SimpleWeb::error_code &ec)
+    client.on_error = [&huoshan](shared_ptr<WssClient::Connection> /*connection*/, const SimpleWeb::error_code &ec)
     {
-        cout << "Client: Error: " << ec << ", error message: " << ec.message() << endl;
+        LOGD(TAG, "Client: error message: {}", ec.message());
+        huoshan.is_ready = false;
     };
 
     std::thread mic_thread([&client, &huoshan]()
@@ -549,13 +723,16 @@ int main(int argc, char *argv[])
                 //printf("HS: session not started, skip audio\n");
                 continue;
             }
-
             client.send(huoshan.TaskRequest((uint8_t*)audio.data(), audio.size()));
         }
     });
 
-
-    client.start();
+    client.start_nonblock();
+    while(true)
+    {
+        client.poll();
+        lcm.handleTimeout(1);
+    }
 }
 #else
 #endif
@@ -565,7 +742,7 @@ int main(int argc, char *argv[])
 [
     {
         "name":"记住当前地点",
-        "patterns":"["",""]",
+        "patterns":["111","222"],
         "cmd":{
             "function":"",
             "param":"{}"

@@ -20,6 +20,7 @@ add_link_options("LINKER:-rpath-link,$ENV{COMMON_DIR}/lib")
 add_compile_options(-g -Wall -Wextra 
                     -Wuninitialized 
                     -Wmaybe-uninitialized
+                    -Wno-unused-parameter
                     -fno-omit-frame-pointer)
 add_compile_options(
                     -DISP_HW_V30 -DRKPLATFORM=ON -DARCH64=OFF
@@ -28,8 +29,8 @@ add_compile_options(
                     )
 add_compile_options(-O0)
 
-#find_package(spdlog REQUIRED)
-#find_package(lcm REQUIRED)
+find_package(spdlog REQUIRED)
+find_package(lcm REQUIRED)
 find_package(PortAudio REQUIRED)
 # Include directories
 include_directories($ENV{COMMON_DIR}/include)
@@ -42,7 +43,9 @@ add_executable(aixd src/ai.cpp src/rksound.cpp)
 
 # Link libraries
 # lcm
-#target_link_libraries(${PROJECT_NAME} lcm)
+target_link_libraries(${PROJECT_NAME} lcm)
+# spdlog
+target_link_libraries(${PROJECT_NAME} spdlog::spdlog)
 # pthread
 target_link_libraries(${PROJECT_NAME} pthread)
 # ssl
@@ -51,4 +54,4 @@ target_link_libraries(${PROJECT_NAME} crypto)
 # portaudio
 target_link_libraries(${PROJECT_NAME} $ENV{COMMON_DIR}/lib/libportaudio.a)
 # alsa
-#target_link_libraries(${PROJECT_NAME} asound)
+target_link_libraries(${PROJECT_NAME} asound)

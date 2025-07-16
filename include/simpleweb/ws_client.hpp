@@ -336,7 +336,10 @@ namespace SimpleWeb {
       }
 
       connect();
+    }
 
+    void poll()
+    {
       if(internal_io_service)
         io_service->poll();
     }
