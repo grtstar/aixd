@@ -4,20 +4,16 @@
 #include <chrono> 
 #include <regex> 
 #include <fstream>
-#include <lcm/lcm-cpp.hpp>
-#include <lcm/lcm.h>
-#include "log_.h"
-#include <mars_message/String.hpp>
 #define SIMPLEWEB_USE_STANDALONE_ASIO 1
 #define ASIO_USE_TS_EXECUTOR_AS_DEFAULT  1
 #include "simpleweb/wss_client.hpp"
 #include "json.hpp"
-#include "rksound.h"
+#include "sound.hpp"
+#include "log_.h"
+
+#define TAG "HUOSHAN"
 
 using SimpleWeb::WssClient;
-using namespace std;
-
-#define TAG "AIXD"
 
 enum MessageType
 {
@@ -78,54 +74,6 @@ enum Event
     ChatEnded = 559,
 };
 
-std::string huoshan_session = R"(
-{
-    "tts": {
-        "audio_config": {
-            "channel": 1,
-            "format": "pcm",
-            "sample_rate": 24000
-        }
-    },
-    "dialog": {
-        "bot_name": "小缘",
-        "system_role": "你是一个超有智能的管家机器人，你还会照顾宠物，帮小学生写作业，你使用活泼灵动的女声，性格开朗，热爱生活。我叫了你的名字后你才开始回应我",
-        "speaking_style": "你的说话风格简洁明了，语速适中，语调自然。",
-        "extra": {
-            "strict_audit": false
-        }
-    }
-})";
-class AudioPool
-{
-private:
-    std::mutex mutex_;
-    std::vector<std::vector<uint8_t>> audio_pool_;
-    int max_cnt;
-public:
-    AudioPool(int cnt = 100) {max_cnt = cnt;}
-    ~AudioPool() {}
-
-    void add_audio(const std::vector<uint8_t> &audio)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        audio_pool_.push_back(audio);
-    }
-
-    std::vector<uint8_t> get_audio()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (audio_pool_.empty())
-            return {};
-        auto audio = audio_pool_.front();
-        audio_pool_.erase(audio_pool_.begin());
-        return audio;
-    }
-};
-
-AudioPool apool;
-AudioPool micpool(20);
-
 struct HuoshanProto
 {
     struct Header
@@ -157,6 +105,9 @@ struct HuoshanProto
     bool disabled_remote = false;
     std::string prompt;
     std::string hello;
+    std::string asrText;
+    AudioPool apool;
+
     HuoshanProto()
     {
 
@@ -463,14 +414,13 @@ public:
     }
 };
 
-
-class AiConfigs
+class LocalAi
 {
-    nlohmann::json j;
+    std::vector<LocalAction> actions;
 public:
-    AiConfigs(const std::string &path)
+    bool LoadAction(const char *path)
     {
-        std::ifstream ifs(path);
+                std::ifstream ifs(path);
         if (ifs.good())
         {
             try
@@ -480,20 +430,10 @@ public:
             catch (const std::exception &e)
             {
                 LOGE(TAG, "RCFG: {}", e.what());
+                return false;
             }
         }
-    }
-    nlohmann::json & GetJson()
-    {
-        return j;
-    }
-};
-class LocalAi
-{
-    std::vector<LocalAction> actions;
-public:
-    bool LoadAction(nlohmann::json & j)
-    {
+
         try
         {
             for(auto & action : j["actions"])
@@ -529,121 +469,135 @@ public:
         return LocalAction();
     }
 };
-
-LocalAi local_ai;
-std::string last_asr;
-
-/**
- * @brief  音频录制回调
- * @param  [IN CONST void*] 输入缓冲区
- * @param  [INOUT void*] 输出缓冲区
- * @param  [IN unsigned long] 每帧的大小
- * @param  [IN CONST PaStreamCallbackTimeInfo*] 时间信息
- * @param  [IN PaStreamCallbackFlags] 状态标志
- * @param  [IN void*] 用户数据
- * @return [*]
- */
-int record_callback(const void* inputBuffer, void* outputBuffer, unsigned long framesPerBuffer,
-    const PaStreamCallbackTimeInfo* timeInfo, PaStreamCallbackFlags statusFlags, void* userData)
-{   
-        // 取第四个通道的数据
-        uint16_t * channel_data = (uint16_t*)malloc(framesPerBuffer * sizeof(uint16_t));
-        if (channel_data == NULL) {
-            LOGE(TAG, "内存分配失败");
-            return 1;
-        }
-        const int channel_index = 3;
-        for(size_t i=0; i<framesPerBuffer; i++)
-        {
-            channel_data[i] = ((uint16_t*)inputBuffer)[i * 4 + channel_index];
-        }
-        // 将音频数据写入 ring buffer
-        micpool.add_audio(std::vector<uint8_t>((uint8_t*)channel_data, (uint8_t*)channel_data + framesPerBuffer * sizeof(uint16_t)));
-        free(channel_data);
-    return 0;
-}
-
-std::string RandReply(std::vector<std::string> replys)
+// upload voice int16, 16k, monophonic, 1 channel
+// download voice float32, 24k, monophonic, 1 channel
+// or int16 24k mono, or ogg/opus
+class HuoshanEngine
 {
-    if(replys.empty())
-        return "";
-    int idx = rand() % replys.size();
-    return replys[idx];
-}
-
-std::string getCurrentTimestamp() {
-        auto now = std::chrono::system_clock::now();
-        auto time_t_now = std::chrono::system_clock::to_time_t(now);
-        
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&time_t_now), "%Y-%m-%d %H:%M:%S");
-        return ss.str();
-    }
-
-#if 1
-int aixdTask(int argc, char *argv[])
-{
-    lcm::LCM lcm;
-
-    if (!lcm.good())
+    PlayDev *playDev;
+    RecordDev *recordDev;
+    WssClient client;
+    HuoshanProto proto;
+    lcm::LCM *lcm;
+public:
+    HuoshanEngine(const char* url, bool verify_certificate, 
+        std::string session_id, std::string prompt, std::string hello,
+        lcm::LCM *lcm, PlayDev *pDev, RecordDev *rDev) : client(url, verify_certificate),
+                  proto(session_id, prompt, hello),
+                  lcm(lcm),
+                  playDev(pDev),
+                  recordDev(rDev)
     {
-        LOGE(TAG, "LCM no good");
-        return 1;
+        // Constructor implementation
+        playDev->AddCb([](const void* inputBuffer, void* outputBuffer,
+                unsigned long framesPerBuffer,
+                const PaStreamCallbackTimeInfo* timeInfo,
+                PaStreamCallbackFlags statusFlags,
+                void* userData){
+                    HuoshanEngine *engine = static_cast<HuoshanEngine *>(userData);
+                    auto audio = apool.get_audio();
+                    if(audio.empty())
+                    {
+                        huoshan.play_idle++;
+                        return paContinue;
+                    }
+                    huoshan.play_idle = 0;
+                    // mix outputBuffer with audio
+                    size_t audio_size = audio.size() / 4; // 4 bytes per sample
+                    audio_size = std::min(audio_size, framesPerBuffer);
+                    if(audio_size > 0)
+                    {
+                        for(size_t i=0; i<audio_size; i++)
+                        {
+                        }
+                    }
+                    return paContinue;
+
+        }, this);
+        recordDev->AddCb([](const void* inputBuffer, void* outputBuffer,
+                unsigned long framesPerBuffer,
+                const PaStreamCallbackTimeInfo* timeInfo,
+                PaStreamCallbackFlags statusFlags,
+                void* userData) {
+                    HuoshanEngine *engine = static_cast<HuoshanEngine *>(userData);
+                    // 取第四个通道的数据
+                    std::vector<uint16_t> chData(framesPerBuffer);
+                    const int channel_index = 3;
+                    for(size_t i=0; i<framesPerBuffer; i++)
+                    {
+                        chData[i] = ((uint16_t*)inputBuffer)[i * 4 + channel_index];
+                    }
+                    engine->client.send(engine->proto.TaskRequest(chData.data(), chData.size() * sizeof(uint16_t));
+                    return paContinue;
+        }, this);
     }
-
-    rksound_play_open(8000, paFloat32, 320, 1, NULL, NULL);
-    rksound_record_open(16000, paInt16, 320, 4, record_callback, NULL);
-  
-    AiConfigs ai_configs("localai.json");
-    
-    HuoshanProto huoshan(getCurrentTimestamp(), ai_configs.GetJson()["system"]["prompt"].dump(), ai_configs.GetJson()["system"]["hello"].get<std::string>());
-    local_ai.LoadAction(ai_configs.GetJson());
-
-    std::thread t([&huoshan]()
+    void Connect()
     {
-        while(1)
+        // Connect to the Huoshan server
+        client.auto_reconnect = true;
+        client.config.header.insert({"X-Api-App-ID", "1279857841"});
+        client.config.header.insert({"X-Api-Access-Key", "vqIUYu8VverjejYLroLhwlhH1VSk-XSY"});
+        client.config.header.insert({"X-Api-Resource-Id", "volc.speech.dialog"});
+        client.config.header.insert({"X-Api-App-Key", "PlgvMymc7f3tQnJ6"});
+        client.config.header.insert({"X-Api-Connect-Id", "xdrobot"});
+        client.on_message = [this](std::shared_ptr<WssClient::Connection> connection, std::shared_ptr<WssClient::InMessage> in_message)
         {
-            auto audio = apool.get_audio();
-            if(audio.empty())
-            {
-                huoshan.play_idle++;
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            huoshan.play_idle = 0;
-            //printf("Audio: play %d bytes\n", audio.size());
-            rksound_play_pcm(audio.data(), audio.size()/4);
-        }
-    });
-
-    WssClient client("openspeech.bytedance.com/api/v3/realtime/dialogue", false);
-    client.auto_reconnect = true;
-    client.config.header.insert({"X-Api-App-ID", "1279857841"});
-    client.config.header.insert({"X-Api-Access-Key", "vqIUYu8VverjejYLroLhwlhH1VSk-XSY"});
-    client.config.header.insert({"X-Api-Resource-Id", "volc.speech.dialog"});
-    client.config.header.insert({"X-Api-App-Key", "PlgvMymc7f3tQnJ6"});
-    client.config.header.insert({"X-Api-Connect-Id", "xdrobot"});
-    client.on_message = [&huoshan, &lcm](shared_ptr<WssClient::Connection> connection, shared_ptr<WssClient::InMessage> in_message)
+            // Handle incoming messages
+            HandleResponse(connection, in_message->string());
+        };
+        client.on_open = [this](std::shared_ptr<WssClient::Connection> connection)
+        {
+            // Handle connection open event
+            connection->send(StartConnect());
+        };
+        client.on_close = [this](std::shared_ptr<WssClient::Connection> /*connection*/, int status, const std::string & /*reason*/)
+        {
+            // Handle connection close event
+        };
+        client.on_error = [this](std::shared_ptr<WssClient::Connection> /*connection*/, const SimpleWeb::error_code &ec)
+        {
+            // Handle connection error
+            LOGD(TAG, "Client: error message: {}", ec.message());
+        };
+        client.start_nonblock();
+    }
+    void Poll() 
     {
-        //cout << "Client: Message received: \"" << in_message->string() << "\"" << endl;
-        HuoshanProto h = huoshan.parse(in_message->string());
+        // Poll the client for incoming messages
+        client.poll();
+    }
+    void LocalAi()
+    {
+
+    }
+    void RemoteAi()
+    {
+
+    }
+    void TTS(const std::string & text)
+    {
+
+    }
+    void HandleResponse(std::shared_ptr<WssClient::Connection> connection, const std::string & response)
+    {
+        HuoshanProto h = proto.parse(response);
         if(h.optional.event == Event::ConnectionStarted)
         {
-            connection->send(huoshan.StartSession());
+            connection->send(proto.StartSession());
         }
         if(h.optional.event == Event::SessionStarted)
         {
-            connection->send(huoshan.SayHello());
+            connection->send(proto.SayHello());
         }
         if(h.optional.event == Event::ASRResponse)
         {
-            last_asr = h.payload;
+            proto.asrText = h.payload;
         }
         if(h.optional.event == Event::ASREnded)
         {
             try
             {
-                nlohmann::json j = nlohmann::json::parse(last_asr);
+                nlohmann::json j = nlohmann::json::parse(proto.asrText);
                 std::string tts = j["extra"]["origin_text"];
                 LOGD(TAG, "ASR: {}", tts.c_str());
                 auto action = local_ai.MatchAction(tts);
@@ -655,21 +609,21 @@ int aixdTask(int argc, char *argv[])
                     {
                         if(ret.value != "")
                         {
-                            connection->send(huoshan.ChatTTSText(ret.value, true, false));
-                            connection->send(huoshan.ChatTTSText("", false, true));
+                            connection->send(proto.ChatTTSText(ret.value, true, false));
+                            connection->send(proto.ChatTTSText("", false, true));
                         }
                         else
                         {
-                            connection->send(huoshan.ChatTTSText(RandReply(action.replysp), true, false));
-                            connection->send(huoshan.ChatTTSText("", false, true));
+                            connection->send(proto.ChatTTSText(RandReply(action.replysp), true, false));
+                            connection->send(proto.ChatTTSText("", false, true));
                         }
                     }
                     else
                     {
-                        connection->send(huoshan.ChatTTSText(RandReply(action.replysn), true, false));
-                        connection->send(huoshan.ChatTTSText("", false, true));
+                        connection->send(proto.ChatTTSText(RandReply(action.replysn), true, false));
+                        connection->send(proto.ChatTTSText("", false, true));
                     }
-                    huoshan.disabled_remote = true;
+                    proto.disabled_remote = true;
                 }
             }
             catch(const std::exception& e)
@@ -680,76 +634,11 @@ int aixdTask(int argc, char *argv[])
         }
         if(h.optional.event == Event::TTSEnded)
         {
-            if(huoshan.disabled_remote)
+            if(proto.disabled_remote)
             {
                 LOGD(TAG, "HS: TTS ended, reset remote");
-                huoshan.disabled_remote = false;
+                proto.disabled_remote = false;
             }
         }
-    };
-
-    client.on_open = [&huoshan](shared_ptr<WssClient::Connection> connection)
-    {
-        cout << "Client: Opened connection" << endl;
-        connection->send(huoshan.StartConnect());
-    };
-
-    client.on_close = [&huoshan](shared_ptr<WssClient::Connection> /*connection*/, int status, const string & /*reason*/)
-    {
-        LOGD(TAG, "Client: Closed connection with status code {}", status);
-        huoshan.is_ready = false;
-    };
-
-    // See http://www.boost.org/doc/libs/1_55_0/doc/html/boost_asio/reference.html, Error Codes for error code meanings
-    client.on_error = [&huoshan](shared_ptr<WssClient::Connection> /*connection*/, const SimpleWeb::error_code &ec)
-    {
-        LOGD(TAG, "Client: error message: {}", ec.message());
-        huoshan.is_ready = false;
-    };
-
-    std::thread mic_thread([&client, &huoshan]()
-    {
-        while(1)
-        {
-            auto audio = micpool.get_audio();
-            if(audio.empty())
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            // Send audio to server
-            if(huoshan.is_ready == false || huoshan.play_idle < 50)
-            {
-                //printf("HS: session not started, skip audio\n");
-                continue;
-            }
-            client.send(huoshan.TaskRequest((uint8_t*)audio.data(), audio.size()));
-        }
-    });
-
-    client.start_nonblock();
-    while(true)
-    {
-        client.poll();
-        lcm.handleTimeout(1);
     }
-}
-#else
-#endif
-
-
-/*
-[
-    {
-        "name":"记住当前地点",
-        "patterns":["111","222"],
-        "cmd":{
-            "function":"",
-            "param":"{}"
-        },
-        "replys":["",""]
-    }
-]
-
-
-*/
+};

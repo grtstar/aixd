@@ -89,12 +89,10 @@ void rksound_record_close()
 void rksound_play_open(int sample_rate, uint32_t sample_format, int frames_per_buffer, int channels, audioCallback callback, void* userdata)
 {
     rksound_init();
-    printf("33333333333333\n");
 
     PaError err;
     PaStreamParameters output_params;
     output_params.device = Pa_GetDefaultOutputDevice();
-    printf("4444444444444444\n");
     output_params.channelCount = channels;
     output_params.sampleFormat = sample_format; // paInt16, paFloat32, etc.
     if(Pa_GetDeviceInfo(output_params.device))
@@ -102,15 +100,12 @@ void rksound_play_open(int sample_rate, uint32_t sample_format, int frames_per_b
         output_params.suggestedLatency = Pa_GetDeviceInfo(output_params.device)->defaultLowOutputLatency;
     }
     output_params.hostApiSpecificStreamInfo = NULL;
-    printf("4444444444444444\n");
 
     err = Pa_OpenStream(&rk_sound.playback_stream, NULL, &output_params, sample_rate, frames_per_buffer, paClipOff, callback, userdata);
     if (err != paNoError) {
         printf("打开播放设备失败：%s\n", Pa_GetErrorText(err));
         return;
     }
-    printf("555555555555555\n");
-
     err = Pa_StartStream(rk_sound.playback_stream);
     if (err != paNoError) {
         printf("启动播放设备失败：%s\n", Pa_GetErrorText(err));

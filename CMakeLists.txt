@@ -39,19 +39,19 @@ include_directories(src)
 include_directories(include)
 
 # Add the executable
-add_executable(aixd src/ai.cpp src/rksound.cpp)
+add_library(aixd src/ai.cpp src/rksound.cpp)
 
 # Link libraries
 # lcm
 target_link_libraries(${PROJECT_NAME} lcm)
 # spdlog
-target_link_libraries(${PROJECT_NAME} spdlog::spdlog)
+target_link_libraries(${PROJECT_NAME} spdlog::spdlog_header_only)
 # pthread
 target_link_libraries(${PROJECT_NAME} pthread)
 # ssl
 target_link_libraries(${PROJECT_NAME} ssl)
 target_link_libraries(${PROJECT_NAME} crypto)
 # portaudio
-target_link_libraries(${PROJECT_NAME} $ENV{COMMON_DIR}/lib/libportaudio.a)
+target_link_libraries(${PROJECT_NAME} portaudio)
 # alsa
 target_link_libraries(${PROJECT_NAME} asound)
