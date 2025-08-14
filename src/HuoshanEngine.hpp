@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <chrono> 
 #include <regex> 
@@ -10,6 +11,8 @@
 #include "json.hpp"
 #include "sound.hpp"
 #include "log_.h"
+
+#include <mars_message/String.hpp>
 
 #define TAG "HUOSHAN"
 
@@ -106,7 +109,6 @@ struct HuoshanProto
     std::string prompt;
     std::string hello;
     std::string asrText;
-    AudioPool apool;
 
     HuoshanProto()
     {
@@ -232,7 +234,7 @@ struct HuoshanProto
                         audio[i+2] = op[start + i * 3 + 2];
                         audio[i+3] = op[start + i * 3 + 3];
                     }
-                    apool.add_audio(audio);
+                    // todo process audio
                 }
             }
         }
@@ -380,6 +382,31 @@ struct HuoshanProto
     }
 };
 
+class AiConfigs
+{
+    nlohmann::json j;
+public:
+    AiConfigs(const std::string &path)
+    {
+        std::ifstream ifs(path);
+        if (ifs.good())
+        {
+            try
+            {
+                j = nlohmann::json::parse(ifs);
+            }
+            catch (const std::exception &e)
+            {
+                LOGE(TAG, "RCFG: {}", e.what());
+            }
+        }
+    }
+    nlohmann::json & GetJson()
+    {
+        return j;
+    }
+};
+
 class LocalCmd
 {
 public:
@@ -418,25 +445,11 @@ class LocalAi
 {
     std::vector<LocalAction> actions;
 public:
-    bool LoadAction(const char *path)
+    bool LoadAction(nlohmann::json & j)
     {
-                std::ifstream ifs(path);
-        if (ifs.good())
-        {
-            try
-            {
-                j = nlohmann::json::parse(ifs);
-            }
-            catch (const std::exception &e)
-            {
-                LOGE(TAG, "RCFG: {}", e.what());
-                return false;
-            }
-        }
-
         try
         {
-            for(auto & action : j["actions"])
+            for(auto & action : j)
             {
                 LocalAction a;
                 a.name = action["name"];
@@ -469,6 +482,15 @@ public:
         return LocalAction();
     }
 };
+
+std::string RandReply(std::vector<std::string> replys)
+{
+    if(replys.empty())
+        return "";
+    int idx = rand() % replys.size();
+    return replys[idx];
+}
+
 // upload voice int16, 16k, monophonic, 1 channel
 // download voice float32, 24k, monophonic, 1 channel
 // or int16 24k mono, or ogg/opus
@@ -479,59 +501,58 @@ class HuoshanEngine
     WssClient client;
     HuoshanProto proto;
     lcm::LCM *lcm;
+    LocalAi *local_ai;
+    AudioQueue apool;
 public:
     HuoshanEngine(const char* url, bool verify_certificate, 
         std::string session_id, std::string prompt, std::string hello,
-        lcm::LCM *lcm, PlayDev *pDev, RecordDev *rDev) : client(url, verify_certificate),
+        lcm::LCM *lcm, PlayDev *pDev, RecordDev *rDev, LocalAi *local_ai) : client(url, verify_certificate),
                   proto(session_id, prompt, hello),
                   lcm(lcm),
                   playDev(pDev),
-                  recordDev(rDev)
+                  recordDev(rDev),
+                  local_ai(local_ai)
     {
         // Constructor implementation
-        playDev->AddCb([](const void* inputBuffer, void* outputBuffer,
-                unsigned long framesPerBuffer,
-                const PaStreamCallbackTimeInfo* timeInfo,
-                PaStreamCallbackFlags statusFlags,
-                void* userData){
-                    HuoshanEngine *engine = static_cast<HuoshanEngine *>(userData);
-                    auto audio = apool.get_audio();
+        playDev->AddCb([](void *pUserdata, 
+                    void *pOutput, 
+                    const void *pInput, 
+                    ma_uint32 frameCount){
+                    HuoshanEngine *engine = static_cast<HuoshanEngine *>(pUserdata);
+                    auto audio = engine->apool.pop_front(AudioTool::CountBytesPerSample(ma_format_f32, 1));
                     if(audio.empty())
                     {
-                        huoshan.play_idle++;
-                        return paContinue;
+                        return;
                     }
-                    huoshan.play_idle = 0;
-                    // mix outputBuffer with audio
-                    size_t audio_size = audio.size() / 4; // 4 bytes per sample
-                    audio_size = std::min(audio_size, framesPerBuffer);
-                    if(audio_size > 0)
+                    engine->proto.play_idle = 0;
+                    auto pcm = AudioTool::ConvertPcm(ma_format_f32, 24000, 1, ma_format_s16, 8000, 1, audio);
+                    if(pcm.empty())
                     {
-                        for(size_t i=0; i<audio_size; i++)
-                        {
-                        }
+                        LOGE(TAG, "HS: ConvertPcm failed");
+                        return;
                     }
-                    return paContinue;
+                    memcpy(pOutput, pcm.data(), pcm.size());
+                    // Use the converted PCM data
+                    return;
 
         }, this);
-        recordDev->AddCb([](const void* inputBuffer, void* outputBuffer,
-                unsigned long framesPerBuffer,
-                const PaStreamCallbackTimeInfo* timeInfo,
-                PaStreamCallbackFlags statusFlags,
-                void* userData) {
-                    HuoshanEngine *engine = static_cast<HuoshanEngine *>(userData);
+        recordDev->AddCb([](void *pUserdata, 
+                    void *pOutput, 
+                    const void *pInput, 
+                    ma_uint32 frameCount) {
+                    HuoshanEngine *engine = static_cast<HuoshanEngine *>(pUserdata);
                     // 取第四个通道的数据
-                    std::vector<uint16_t> chData(framesPerBuffer);
+                    std::vector<uint16_t> chData(frameCount);
                     const int channel_index = 3;
-                    for(size_t i=0; i<framesPerBuffer; i++)
+                    for(size_t i=0; i<frameCount; i++)
                     {
-                        chData[i] = ((uint16_t*)inputBuffer)[i * 4 + channel_index];
+                        chData[i] = ((uint16_t*)pInput)[i * 4 + channel_index];
                     }
-                    engine->client.send(engine->proto.TaskRequest(chData.data(), chData.size() * sizeof(uint16_t));
-                    return paContinue;
+                    //engine->client.send(engine->proto.TaskRequest(chData.data(), chData.size() * sizeof(uint16_t)));
+                    return;
         }, this);
     }
-    void Connect()
+    void Connect(bool blocking = true)
     {
         // Connect to the Huoshan server
         client.auto_reconnect = true;
@@ -548,7 +569,7 @@ public:
         client.on_open = [this](std::shared_ptr<WssClient::Connection> connection)
         {
             // Handle connection open event
-            connection->send(StartConnect());
+            connection->send(proto.StartConnect());
         };
         client.on_close = [this](std::shared_ptr<WssClient::Connection> /*connection*/, int status, const std::string & /*reason*/)
         {
@@ -559,20 +580,19 @@ public:
             // Handle connection error
             LOGD(TAG, "Client: error message: {}", ec.message());
         };
-        client.start_nonblock();
+        if(blocking)
+        {
+            client.start();
+        }
+        else
+        {
+            client.start_nonblock();
+        }
     }
     void Poll() 
     {
         // Poll the client for incoming messages
         client.poll();
-    }
-    void LocalAi()
-    {
-
-    }
-    void RemoteAi()
-    {
-
     }
     void TTS(const std::string & text)
     {
@@ -600,12 +620,12 @@ public:
                 nlohmann::json j = nlohmann::json::parse(proto.asrText);
                 std::string tts = j["extra"]["origin_text"];
                 LOGD(TAG, "ASR: {}", tts.c_str());
-                auto action = local_ai.MatchAction(tts);
+                auto action = local_ai->MatchAction(tts);
                 if(!action.name.empty())
                 {
                     mars_message::String msg, ret;
                     msg.value = action.cmd.params;
-                    if(lcm.send(action.cmd.function, &msg, &ret, 500, 1) == 0)
+                    if(lcm->send(action.cmd.function, &msg, &ret, 500, 1) == 0)
                     {
                         if(ret.value != "")
                         {
@@ -629,7 +649,7 @@ public:
             catch(const std::exception& e)
             {
                 LOGE(TAG, "ASR Parse Error: {}", e.what());
-                LOGD(TAG, "ASR Raw Data: {}", last_asr.c_str());
+                LOGD(TAG, "ASR Raw Data: {}", proto.asrText);
             }
         }
         if(h.optional.event == Event::TTSEnded)

@@ -39,7 +39,11 @@ include_directories(src)
 include_directories(include)
 
 # Add the executable
-add_library(aixd src/ai.cpp src/rksound.cpp)
+add_library(aixd 
+            src/ai.cpp 
+            src/rksound.cpp
+            src/aixd.cpp)
+
 
 # Link libraries
 # lcm

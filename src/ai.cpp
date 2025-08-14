@@ -581,7 +581,7 @@ std::string getCurrentTimestamp() {
     }
 
 #if 1
-int aixdTask(int argc, char *argv[])
+int main(int argc, char *argv[])
 {
     lcm::LCM lcm;
 
