@@ -12,5 +12,11 @@ void AiSoundTask(lcm::LCM &lcm, PlayDev &playDev, RecordDev &recordDev)
         ai_configs["system"]["prompt"].dump(),
         ai_configs["system"]["hello"].get<std::string>(),
         &lcm, &playDev, &recordDev, &local_ai);
-    engine.Connect();
+    engine.Connect(false);
+
+    while(true)
+    {
+        engine.Poll();
+        lcm.handleTimeout(10);
+    }
 }

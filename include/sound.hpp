@@ -28,11 +28,12 @@ class SoundDev
 {
 protected:
     std::vector<SoundCb> cbs;
+    PaStream *stream;
+public:
     int sample_rate;
     uint32_t sample_format;
     int frames_per_buffer;
     int channels;
-    PaStream *stream;
 
 public:
     SoundDev(int sample_rate, uint32_t sample_format, int frames_per_buffer, int channels)
@@ -113,128 +114,6 @@ public:
     }
 };
 
-class PlayDev : public SoundDev
-{
-    ma_device device;
-    ma_context context;
-    AudioQueue audio_queue_;
-public:
-    using SoundDev::SoundDev;
-    virtual int Open() override
-    {
-        ma_backend backends[] = {ma_backend_alsa};
-        ma_context_config ctxConfig = ma_context_config_init();
-
-        if (ma_context_init(backends, 1, &ctxConfig, &context) != MA_SUCCESS)
-        {
-            printf("Failed to initialize miniaudio context\n");
-            return -1;
-        }
-
-        ma_device_config devConfig = ma_device_config_init(ma_device_type_playback);
-        devConfig.playback.format = (ma_format)sample_format; // or ma_format_f32
-        devConfig.playback.channels = channels;
-        devConfig.sampleRate = sample_rate;
-        devConfig.dataCallback = AudioCallback; // Set your callback function
-        devConfig.pUserData = this; // Pass pointer to your audio queue if needed
-
-        if (ma_device_init(&context, &devConfig, &device) != MA_SUCCESS)
-        {
-            printf("Failed to open playback device\n");
-            ma_context_uninit(&context);
-            return -1;
-        }
-        if (ma_device_start(&device) != MA_SUCCESS)
-        {
-            printf("Failed to start playback device\n");
-            ma_device_uninit(&device);
-            ma_context_uninit(&context);
-            return -1;
-        }
-
-        AddCb(PlayCb, this); // Register the playback callback
-        return 0;
-    }
-    virtual int Close() override
-    {
-        RemoveCb(PlayCb); // Unregister the playback callback
-        ma_device_uninit(&device);
-        ma_context_uninit(&context);
-        return 0;
-    }
-    static void PlayCb(void *pUserData, 
-                    void *pOutput, 
-                    const void *pInput, 
-                    ma_uint32 frameCount)
-    {
-        PlayDev *pPlayDev = static_cast<PlayDev *>(pUserData);
-        std::vector<uint8_t> audioData = pPlayDev->audio_queue_.pop_front(frameCount * pPlayDev->BytesPerFrame());
-        if (!audioData.empty())
-        {
-            std::copy(audioData.begin(), audioData.end(), (uint8_t *)pOutput);
-        }
-        else
-        {
-            // Fill with silence if no data available
-            std::fill((uint8_t *)pOutput, (uint8_t *)pOutput + frameCount * pPlayDev->BytesPerFrame(), 0);
-        }
-    }
-    void Play(void *data, size_t size)
-    {
-        if (data == nullptr || size == 0)
-        {
-            return;
-        }
-        audio_queue_.push(std::vector<uint8_t>((uint8_t *)data, (uint8_t *)data + size));
-    }
-};
-
-class RecordDev : public SoundDev
-{
-    ma_device device;
-    ma_context context;
-public:
-    using SoundDev::SoundDev;
-    virtual int Open() override
-    {
-        // Open the recording device
-        ma_backend backends[] = {ma_backend_alsa};
-        ma_context_config ctxConfig = ma_context_config_init();
-        if (ma_context_init(backends, 1, &ctxConfig, &context) != MA_SUCCESS)
-        {
-            printf("Failed to initialize miniaudio context\n");
-            return -1;
-        }
-        ma_device_config devConfig = ma_device_config_init(ma_device_type_capture);
-        devConfig.capture.format = (ma_format)sample_format; // e.g., ma_format_f32
-        devConfig.capture.channels = channels;
-        devConfig.sampleRate = sample_rate;
-        devConfig.dataCallback = AudioCallback; // Set your callback if needed
-        devConfig.pUserData = this; // Pass pointer to your audio queue if needed
-        if (ma_device_init(&context, &devConfig, &device) != MA_SUCCESS)
-        {
-            printf("Failed to open recording device\n");
-            ma_context_uninit(&context);
-            return -1;
-        }
-        if (ma_device_start(&device) != MA_SUCCESS)
-        {
-            printf("Failed to start recording device\n");
-            ma_device_uninit(&device);
-            ma_context_uninit(&context);
-            return -1;
-        }
-        return 0;
-    }
-    virtual int Close() override
-    {
-        // Close the recording device
-        ma_device_uninit(&device);
-        ma_context_uninit(&context);
-        return 0;
-    }
-};
-
 class PcmConverter
 {
 private:
@@ -296,4 +175,143 @@ public:
     {
         return Convert(inputData.data(), inputData.size());
     }   
+};
+
+class PlayDev : public SoundDev
+{
+    ma_device device;
+    ma_context context;
+    AudioQueue audio_queue_;
+public:
+    using SoundDev::SoundDev;
+    virtual int Open() override
+    {
+        ma_backend backends[] = {ma_backend_alsa};
+        ma_context_config ctxConfig = ma_context_config_init();
+
+        if (ma_context_init(backends, 1, &ctxConfig, &context) != MA_SUCCESS)
+        {
+            printf("Failed to initialize miniaudio context\n");
+            return -1;
+        }
+
+        ma_device_config devConfig = ma_device_config_init(ma_device_type_playback);
+        devConfig.playback.format = (ma_format)sample_format; // or ma_format_f32
+        devConfig.playback.channels = channels;
+        devConfig.sampleRate = sample_rate;
+        devConfig.dataCallback = AudioCallback; // Set your callback function
+        devConfig.pUserData = this; // Pass pointer to your audio queue if needed
+
+        if (ma_device_init(&context, &devConfig, &device) != MA_SUCCESS)
+        {
+            printf("Failed to open playback device\n");
+            ma_context_uninit(&context);
+            return -1;
+        }
+        if (ma_device_start(&device) != MA_SUCCESS)
+        {
+            printf("Failed to start playback device\n");
+            ma_device_uninit(&device);
+            ma_context_uninit(&context);
+            return -1;
+        }
+
+        AddCb(PlayCb, this); // Register the playback callback
+        return 0;
+    }
+    virtual int Close() override
+    {
+        RemoveCb(PlayCb); // Unregister the playback callback
+        ma_device_uninit(&device);
+        ma_context_uninit(&context);
+        return 0;
+    }
+    static void PlayCb(void *pUserData, 
+                    void *pOutput, 
+                    const void *pInput, 
+                    ma_uint32 frameCount)
+    {
+        PlayDev *pPlayDev = static_cast<PlayDev *>(pUserData);
+        std::vector<uint8_t> audioData = pPlayDev->audio_queue_.pop_front(frameCount * pPlayDev->BytesPerFrame());
+        if (!audioData.empty())
+        {
+            memcpy(pOutput, audioData.data(), audioData.size());
+        }
+        else
+        {
+            // Fill with silence if no data available
+            // std::fill((uint8_t *)pOutput, (uint8_t *)pOutput + frameCount * pPlayDev->BytesPerFrame(), 0);
+        }
+    }
+    void Play(void *data, size_t size)
+    {
+        if (data == nullptr || size == 0)
+        {
+            return;
+        }
+        audio_queue_.push(std::vector<uint8_t>((uint8_t *)data, (uint8_t *)data + size));
+    }
+    void Play(void *data, size_t size, int sample_rate, uint32_t sample_format, int channels)
+    {
+        if (data == nullptr || size == 0)
+        {
+            return;
+        }
+        // Adjust the playback parameters if needed
+        PcmConverter converter(
+            (int)sample_format, sample_rate, channels,
+            (int)this->sample_format, this->sample_rate, this->channels);
+        std::vector<uint8_t> convertedData = converter.Convert(data, size);
+        if (convertedData.empty())
+        {
+            return;
+        }
+        audio_queue_.push(convertedData);
+    }
+};
+
+class RecordDev : public SoundDev
+{
+    ma_device device;
+    ma_context context;
+public:
+    using SoundDev::SoundDev;
+    virtual int Open() override
+    {
+        // Open the recording device
+        ma_backend backends[] = {ma_backend_alsa};
+        ma_context_config ctxConfig = ma_context_config_init();
+        if (ma_context_init(backends, 1, &ctxConfig, &context) != MA_SUCCESS)
+        {
+            printf("Failed to initialize miniaudio context\n");
+            return -1;
+        }
+        ma_device_config devConfig = ma_device_config_init(ma_device_type_capture);
+        devConfig.capture.format = (ma_format)sample_format; // e.g., ma_format_f32
+        devConfig.capture.channels = channels;
+        devConfig.sampleRate = sample_rate;
+        devConfig.dataCallback = AudioCallback; // Set your callback if needed
+        devConfig.pUserData = this; // Pass pointer to your audio queue if needed
+        if (ma_device_init(&context, &devConfig, &device) != MA_SUCCESS)
+        {
+            printf("Failed to open recording device\n");
+            ma_context_uninit(&context);
+            return -1;
+        }
+        if (ma_device_start(&device) != MA_SUCCESS)
+        {
+            printf("Failed to start recording device\n");
+            ma_device_uninit(&device);
+            ma_context_uninit(&context);
+            return -1;
+        }
+        return 0;
+    }
+    virtual int Close() override
+    {
+        // Close the recording device
+        ma_device_uninit(&device);
+        ma_context_uninit(&context);
+        return 0;
+    }
 };

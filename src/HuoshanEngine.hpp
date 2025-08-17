@@ -509,7 +509,7 @@ public:
                   playDev(pDev),
                   recordDev(rDev),
                   local_ai(local_ai),
-                    pcm_converter(ma_format_f32, 24000, 1, ma_format_f32, 8000, 1)
+                    pcm_converter(ma_format_f32, 24000, 1, playDev->sample_format, playDev->sample_rate, playDev->channels)
     {
         // Constructor implementation
         playDev->AddCb([](void *pUserdata, 
@@ -517,7 +517,7 @@ public:
                     const void *pInput, 
                     ma_uint32 frameCount){
                     HuoshanEngine *engine = static_cast<HuoshanEngine *>(pUserdata);
-                    auto audio = engine->apool.pop_front(PcmConverter::GetBytesPerFrame(ma_format_f32, 1) * frameCount);
+                    auto audio = engine->apool.pop_front(engine->playDev->BytesPerFrame() * frameCount);
                     if(audio.empty())
                     {
                         return;
