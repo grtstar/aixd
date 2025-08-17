@@ -12,12 +12,15 @@
 #define ASIO_USE_TS_EXECUTOR_AS_DEFAULT  1
 #include "simpleweb/wss_client.hpp"
 #include "json.hpp"
+
+#define TAG "AIXD"
+#if 0
+
 #include "rksound.h"
 
 using SimpleWeb::WssClient;
 using namespace std;
 
-#define TAG "AIXD"
 
 enum MessageType
 {
@@ -580,7 +583,6 @@ std::string getCurrentTimestamp() {
         return ss.str();
     }
 
-#if 1
 int main(int argc, char *argv[])
 {
     lcm::LCM lcm;
@@ -735,9 +737,40 @@ int main(int argc, char *argv[])
     }
 }
 #else
+#include "HuoshanEngine.hpp"
+
+int main(int argc, char *argv[])
+{
+    lcm::LCM lcm;
+
+    if (!lcm.good())
+    {
+        LOGE(TAG, "LCM no good");
+        return 1;
+    }
+    PlayDev playDev(8000, ma_format_f32, 320, 1);
+    playDev.Open();
+    RecordDev recordDev(8000, ma_format_s16, 320, 1);
+    recordDev.Open();
+    AiConfigs ai_configs("localai.json");
+    LOGL(TAG);
+    LocalAi local_ai;
+    local_ai.LoadAction(ai_configs["actions"]);
+    LOGL(TAG);
+    HuoshanEngine engine("openspeech.bytedance.com/api/v3/realtime/dialogue", false,
+        ai_configs["system"]["prompt"].dump(),
+        ai_configs["system"]["hello"].get<std::string>(),
+        &lcm, &playDev, &recordDev, &local_ai);
+
+    engine.Connect(false);
+    while(true)
+    {
+        engine.Poll();
+        lcm.handleTimeout(10);
+    }
+    return 0;
+}
 #endif
-
-
 /*
 [
     {

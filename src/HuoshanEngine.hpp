@@ -219,24 +219,7 @@ struct HuoshanProto
                     }
                 }
             }
-            if(hp.header.message_type == AUDIO_ONLY_RSP)
-            {
-                // printf("HS: audio: %d\n", hp.payload_size);
-                // Convert 24000Hz Float32 audio to 8000Hz by taking every third sample
-                
-                if(!disabled_remote)
-                {
-                    std::vector<uint8_t> audio(hp.payload.size() / 4 / 3 * 4); // 24000Hz Float32 audio to 8000Hz Float32 audio
-                    for(size_t i=0; i<audio.size(); i+=4)
-                    {
-                        audio[i+0] = op[start + i * 3 + 0];
-                        audio[i+1] = op[start + i * 3 + 1];
-                        audio[i+2] = op[start + i * 3 + 2];
-                        audio[i+3] = op[start + i * 3 + 3];
-                    }
-                    // todo process audio
-                }
-            }
+            
         }
         else if(hp.header.message_type == ERROR_INFO)
         {
@@ -290,7 +273,7 @@ struct HuoshanProto
         d += prompt;
         return d;
     }
-    std::string TaskRequest(uint8_t* audio, int len)
+    std::string TaskRequest(const void* audio, size_t len)
     {
         //printf("HS: TaskRequest\n");
         auto d = genrate_header(0x1, AUDIO_ONLY_REQ, MSG_WITH_EVENT, NO_SERIALIZATION);
@@ -301,7 +284,7 @@ struct HuoshanProto
 
         auto payload_size = to_bytesb(len);
         d += to_bytesb(len); // payload size
-        d.insert(d.end(), audio, audio + len); // payload
+        d.insert(d.end(), (const uint8_t*)audio, (const uint8_t*)audio + len); // payload
         return d;
     }
     std::string FinishSession()
@@ -405,6 +388,14 @@ public:
     {
         return j;
     }
+    operator nlohmann::json &()
+    {
+        return j;
+    }
+    nlohmann::json & operator[](const std::string &key)
+    {
+        return j[key];
+    }
 };
 
 class LocalCmd
@@ -483,35 +474,41 @@ public:
     }
 };
 
-std::string RandReply(std::vector<std::string> replys)
-{
-    if(replys.empty())
-        return "";
-    int idx = rand() % replys.size();
-    return replys[idx];
-}
-
 // upload voice int16, 16k, monophonic, 1 channel
 // download voice float32, 24k, monophonic, 1 channel
 // or int16 24k mono, or ogg/opus
 class HuoshanEngine
 {
-    PlayDev *playDev;
-    RecordDev *recordDev;
     WssClient client;
     HuoshanProto proto;
     lcm::LCM *lcm;
+    PlayDev *playDev;
+    RecordDev *recordDev;
     LocalAi *local_ai;
+    PcmConverter pcm_converter;
     AudioQueue apool;
 public:
+    std::string GetSessionId()
+    {
+        // Get MAC address of eth0
+        std::ifstream ifs("/sys/class/net/eth0/address");
+        std::string mac;
+        if (ifs.good()) {
+            std::getline(ifs, mac);
+            // Remove colons from MAC address
+            mac.erase(std::remove(mac.begin(), mac.end(), ':'), mac.end());
+        }
+        return mac;
+    }
     HuoshanEngine(const char* url, bool verify_certificate, 
-        std::string session_id, std::string prompt, std::string hello,
+        std::string prompt, std::string hello,
         lcm::LCM *lcm, PlayDev *pDev, RecordDev *rDev, LocalAi *local_ai) : client(url, verify_certificate),
-                  proto(session_id, prompt, hello),
+                  proto(GetSessionId(), prompt, hello),
                   lcm(lcm),
                   playDev(pDev),
                   recordDev(rDev),
-                  local_ai(local_ai)
+                  local_ai(local_ai),
+                    pcm_converter(ma_format_f32, 24000, 1, ma_format_f32, 8000, 1)
     {
         // Constructor implementation
         playDev->AddCb([](void *pUserdata, 
@@ -519,20 +516,13 @@ public:
                     const void *pInput, 
                     ma_uint32 frameCount){
                     HuoshanEngine *engine = static_cast<HuoshanEngine *>(pUserdata);
-                    auto audio = engine->apool.pop_front(AudioTool::CountBytesPerSample(ma_format_f32, 1));
+                    auto audio = engine->apool.pop_front(PcmConverter::GetBytesPerFrame(ma_format_f32, 1) * frameCount);
                     if(audio.empty())
                     {
                         return;
                     }
                     engine->proto.play_idle = 0;
-                    auto pcm = AudioTool::ConvertPcm(ma_format_f32, 24000, 1, ma_format_s16, 8000, 1, audio);
-                    if(pcm.empty())
-                    {
-                        LOGE(TAG, "HS: ConvertPcm failed");
-                        return;
-                    }
-                    memcpy(pOutput, pcm.data(), pcm.size());
-                    // Use the converted PCM data
+                    memcpy(pOutput, audio.data(), audio.size());
                     return;
 
         }, this);
@@ -541,14 +531,7 @@ public:
                     const void *pInput, 
                     ma_uint32 frameCount) {
                     HuoshanEngine *engine = static_cast<HuoshanEngine *>(pUserdata);
-                    // 取第四个通道的数据
-                    std::vector<uint16_t> chData(frameCount);
-                    const int channel_index = 3;
-                    for(size_t i=0; i<frameCount; i++)
-                    {
-                        chData[i] = ((uint16_t*)pInput)[i * 4 + channel_index];
-                    }
-                    //engine->client.send(engine->proto.TaskRequest(chData.data(), chData.size() * sizeof(uint16_t)));
+                    engine->client.send(engine->proto.TaskRequest(pInput, frameCount * engine->recordDev->BytesPerFrame()));
                     return;
         }, this);
     }
@@ -598,6 +581,15 @@ public:
     {
 
     }
+
+    std::string RandReply(std::vector<std::string> replys)
+    {
+        if(replys.empty())
+            return "";
+        int idx = rand() % replys.size();
+        return replys[idx];
+    }
+
     void HandleResponse(std::shared_ptr<WssClient::Connection> connection, const std::string & response)
     {
         HuoshanProto h = proto.parse(response);
@@ -658,6 +650,20 @@ public:
             {
                 LOGD(TAG, "HS: TTS ended, reset remote");
                 proto.disabled_remote = false;
+            }
+        }
+        if(h.header.message_type == AUDIO_ONLY_RSP)
+        {
+            // printf("HS: audio: %d\n", hp.payload_size);
+            // Convert 24000Hz Float32 audio to 8000Hz by taking every third sample
+
+            if(!proto.disabled_remote)
+            {
+                std::vector<uint8_t> audio = pcm_converter.Convert(h.payload.data(), h.payload.size());
+                if(!audio.empty())
+                {
+                    apool.push(audio);
+                }
             }
         }
     }

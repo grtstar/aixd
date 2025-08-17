@@ -3,12 +3,17 @@
 #include <stdint.h>
 #include <vector>
 #include <deque>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <chrono> 
+
 #include <portaudio.h>
 #include <algorithm>
 #include <portaudio.h>
 #include <miniaudio.h>
 
-typedef void (*audioCallback)(void *pUserData, 
+using audioCallback = void (*)(void *pUserData, 
                     void *pOutput, 
                     const void *pInput, 
                     ma_uint32 frameCount);
@@ -66,13 +71,53 @@ public:
         // Close the audio device
         return 0;
     }
+    int BytesPerSample() const
+    {
+        return ma_get_bytes_per_sample((ma_format)sample_format);
+    }
+    int BytesPerFrame() const
+    {
+        return ma_get_bytes_per_frame((ma_format)sample_format, channels);
+    }
+};
+
+
+class AudioQueue
+{
+private:
+    std::mutex mutex_;
+    std::deque<uint8_t> audio_queue_;
+    int max_size = 100 * 1024; // Default max size of 100 KB
+
+public:
+
+    AudioQueue() {}
+    ~AudioQueue() {}
+
+    void push(const std::vector<uint8_t> &audio)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        audio_queue_.insert(audio_queue_.end(), audio.begin(), audio.end());
+    }
+
+    std::vector<uint8_t> pop_front(size_t size = 1024)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (audio_queue_.size() < size)
+        {
+            size = audio_queue_.size();
+        }
+        std::vector<uint8_t> audio(audio_queue_.begin(), audio_queue_.begin() + size);
+        audio_queue_.erase(audio_queue_.begin(), audio_queue_.begin() + size);
+        return audio;
+    }
 };
 
 class PlayDev : public SoundDev
 {
     ma_device device;
     ma_context context;
-
+    AudioQueue audio_queue_;
 public:
     using SoundDev::SoundDev;
     virtual int Open() override
@@ -106,13 +151,41 @@ public:
             ma_context_uninit(&context);
             return -1;
         }
+
+        AddCb(PlayCb, this); // Register the playback callback
         return 0;
     }
     virtual int Close() override
     {
+        RemoveCb(PlayCb); // Unregister the playback callback
         ma_device_uninit(&device);
         ma_context_uninit(&context);
         return 0;
+    }
+    static void PlayCb(void *pUserData, 
+                    void *pOutput, 
+                    const void *pInput, 
+                    ma_uint32 frameCount)
+    {
+        PlayDev *pPlayDev = static_cast<PlayDev *>(pUserData);
+        std::vector<uint8_t> audioData = pPlayDev->audio_queue_.pop_front(frameCount * pPlayDev->BytesPerFrame());
+        if (!audioData.empty())
+        {
+            std::copy(audioData.begin(), audioData.end(), (uint8_t *)pOutput);
+        }
+        else
+        {
+            // Fill with silence if no data available
+            std::fill((uint8_t *)pOutput, (uint8_t *)pOutput + frameCount * pPlayDev->BytesPerFrame(), 0);
+        }
+    }
+    void Play(void *data, size_t size)
+    {
+        if (data == nullptr || size == 0)
+        {
+            return;
+        }
+        audio_queue_.push(std::vector<uint8_t>((uint8_t *)data, (uint8_t *)data + size));
     }
 };
 
@@ -162,98 +235,65 @@ public:
     }
 };
 
-class AudioTool
-{
-public:
-    static int CountBytesPerSample(ma_format sample_format, int channels)
-    {
-        switch (sample_format)
-        {
-        case ma_format_u8:
-            return 1 * channels; // 8-bit unsigned
-        case ma_format_s16:
-            return 2 * channels; // 16-bit signed
-        case ma_format_s24:
-            return 3 * channels; // 24-bit signed, tightly packed
-        case ma_format_s32:
-            return 4 * channels; // 32-bit signed
-        case ma_format_f32:
-            return 4 * channels; // 32-bit float
-        default:
-            return 0; // Unsupported format
-        }
-    }
-    static std::vector<uint8_t> ConvertPcm(int inFormat, int inSampleRate, int inChannels,
-                                           int outFormat, int outSampleRate, int outChannels,
-                                           const std::vector<uint8_t> &inputData)
-    {
-        std::vector<uint8_t> outputData;
-        ma_data_converter converter;
-        ma_data_converter_config config = ma_data_converter_config_init(
-            (ma_format)inFormat, (ma_format)outFormat, inChannels, outChannels,
-            inSampleRate, outSampleRate);
-
-        if (ma_data_converter_init(&config, NULL, &converter) != MA_SUCCESS)
-        {
-            printf("Failed to initialize PCM converter\n");
-            return outputData;
-        }
-
-        size_t inFrameSize = ma_get_bytes_per_frame((ma_format)inFormat, inChannels);
-        size_t outFrameSize = ma_get_bytes_per_frame((ma_format)outFormat, outChannels);
-        ma_uint64 inFrameCount = inputData.size() / inFrameSize;
-        ma_uint64 outFrameCount = inFrameCount * outSampleRate / inSampleRate + 1;
-
-        outputData.resize(outFrameCount * outFrameSize);
-
-        ma_uint64 framesConverted = outFrameCount;
-        ma_result result = ma_data_converter_process_pcm_frames(
-            &converter,
-            inputData.data(), &inFrameCount,
-            outputData.data(), &framesConverted);
-
-        if (result != MA_SUCCESS)
-        {
-            printf("PCM conversion failed\n");
-            outputData.clear();
-        }
-        else
-        {
-            outputData.resize(framesConverted * outFrameSize);
-        }
-
-        ma_data_converter_uninit(&converter, NULL);
-        return outputData;
-    }
-};
-
-class AudioQueue
+class PcmConverter
 {
 private:
-    std::mutex mutex_;
-    std::deque<uint8_t> audio_queue_;
-    int max_size = 100 * 1024; // Default max size of 100 KB
-
+    ma_data_converter converter;
+    ma_data_converter_config config;
+    int inFormat;
+    int inSampleRate;
+    int inChannels;
+    int outFormat;
+    int outSampleRate;
+    int outChannels;
 public:
-
-    AudioQueue() {}
-    ~AudioQueue() {}
-
-    void push(const std::vector<uint8_t> &audio)
+    PcmConverter(int inFormat, int inSampleRate, int inChannels,
+                   int outFormat, int outSampleRate, int outChannels)
+        : inFormat(inFormat), inSampleRate(inSampleRate), inChannels(inChannels),
+          outFormat(outFormat), outSampleRate(outSampleRate), outChannels(outChannels)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        audio_queue_.insert(audio_queue_.end(), audio.begin(), audio.end());
-    }
-
-    std::vector<uint8_t> pop_front(int size = 1024)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (audio_queue_.size() < size)
-        {
-            size = audio_queue_.size();
+        config = ma_data_converter_config_init(
+            (ma_format)inFormat, (ma_format)outFormat, inChannels, outChannels,
+            inSampleRate, outSampleRate);
+        if (ma_data_converter_init(&config, NULL, &converter) != MA_SUCCESS) {
+            throw std::runtime_error("Failed to initialize PCM converter");
         }
-        std::vector<uint8_t> audio(audio_queue_.begin(), audio_queue_.begin() + size);
-        audio_queue_.erase(audio_queue_.begin(), audio_queue_.begin() + size);
-        return audio;
     }
+    ~PcmConverter()
+    {
+        ma_data_converter_uninit(&converter, NULL);
+    }
+    static int GetBytesPerFrame(int format, int channels)
+    {
+        return ma_get_bytes_per_frame((ma_format)format, channels);
+    }
+    std::vector<uint8_t> Convert(const void*data, size_t size)
+    {
+        if (data == nullptr || size == 0) {
+            return {};
+        }
+        size_t inFrameSize = GetBytesPerFrame(inFormat, inChannels);
+        size_t outFrameSize = GetBytesPerFrame(outFormat, outChannels);
+        ma_uint64 inFrameCount = size / inFrameSize;
+        ma_uint64 outFrameCount = inFrameCount * outSampleRate / inSampleRate + 1;
+        std::vector<uint8_t> outputData(outFrameCount * outFrameSize);
+        ma_uint64 framesConverted = outFrameCount;
+        
+        ma_result result = ma_data_converter_process_pcm_frames(
+            &converter,
+            data, &inFrameCount,
+            outputData.data(), &framesConverted);
+
+        if (result != MA_SUCCESS) {
+            printf("PCM conversion failed\n");
+            outputData.clear();
+        } else {
+            outputData.resize(framesConverted * outFrameSize);
+        }
+        return outputData;
+    }
+    std::vector<uint8_t> Convert(const std::vector<uint8_t> &inputData)
+    {
+        return Convert(inputData.data(), inputData.size());
+    }   
 };
