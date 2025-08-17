@@ -43,18 +43,39 @@ add_library(aixd
             src/aixd.cpp
             src/miniaudio.c)
 
+add_executable(xdai src/aixd.cpp
+                    src/miniaudio.c
+                    src/ai.cpp
+                    src/rksound.cpp)
+# strip
+set_target_properties(xdai PROPERTIES LINK_FLAGS "-s")
 
 # Link libraries
 # lcm
 target_link_libraries(${PROJECT_NAME} lcm)
-# spdlog
+# # spdlog
 target_link_libraries(${PROJECT_NAME} spdlog::spdlog_header_only)
-# pthread
+# # pthread
 target_link_libraries(${PROJECT_NAME} pthread)
-# ssl
+# # ssl
 target_link_libraries(${PROJECT_NAME} ssl)
 target_link_libraries(${PROJECT_NAME} crypto)
-# portaudio
+# # portaudio
 target_link_libraries(${PROJECT_NAME} portaudio)
-# alsa
+# # alsa
 target_link_libraries(${PROJECT_NAME} asound)
+
+# Link libraries
+# lcm
+target_link_libraries(xdai lcm)
+# spdlog
+target_link_libraries(xdai spdlog::spdlog_header_only)
+# pthread
+target_link_libraries(xdai pthread)
+# ssl
+target_link_libraries(xdai ssl)
+target_link_libraries(xdai crypto)
+# # portaudio
+target_link_libraries(xdai portaudio)
+# alsa
+target_link_libraries(xdai asound)

@@ -241,12 +241,13 @@ struct HuoshanProto
 
     std::string StartConnect()
     {
-        LOGD(TAG, "HS: StartConnect");
         auto d = genrate_header();
         d.append(to_bytesb(Event::StartConnect));
         std::string json = "{}";
         d.append(to_bytesb(json.length())); // payload size
         d.append(json); // payload
+        
+        LOGD(TAG, "HS: StartConnect ----{}", spdlog::to_hex(d));
         return d;
     }
     std::string FinishConnect()
@@ -498,7 +499,7 @@ public:
             // Remove colons from MAC address
             mac.erase(std::remove(mac.begin(), mac.end(), ':'), mac.end());
         }
-        return mac;
+        return "xdrobot_" + mac;
     }
     HuoshanEngine(const char* url, bool verify_certificate, 
         std::string prompt, std::string hello,
@@ -531,14 +532,16 @@ public:
                     const void *pInput, 
                     ma_uint32 frameCount) {
                     HuoshanEngine *engine = static_cast<HuoshanEngine *>(pUserdata);
-                    engine->client.send(engine->proto.TaskRequest(pInput, frameCount * engine->recordDev->BytesPerFrame()));
+                    if(engine->proto.is_ready)
+                    {
+                        engine->client.send(engine->proto.TaskRequest(pInput, frameCount * engine->recordDev->BytesPerFrame()));
+                    }
                     return;
         }, this);
     }
     void Connect(bool blocking = true)
     {
         // Connect to the Huoshan server
-        client.auto_reconnect = true;
         client.config.header.insert({"X-Api-App-ID", "1279857841"});
         client.config.header.insert({"X-Api-Access-Key", "vqIUYu8VverjejYLroLhwlhH1VSk-XSY"});
         client.config.header.insert({"X-Api-Resource-Id", "volc.speech.dialog"});
@@ -556,12 +559,14 @@ public:
         };
         client.on_close = [this](std::shared_ptr<WssClient::Connection> /*connection*/, int status, const std::string & /*reason*/)
         {
-            // Handle connection close event
+            LOGD(TAG, "Client: Closed connection with status code {}", status);
+            proto.is_ready = false;
         };
         client.on_error = [this](std::shared_ptr<WssClient::Connection> /*connection*/, const SimpleWeb::error_code &ec)
         {
             // Handle connection error
-            LOGD(TAG, "Client: error message: {}", ec.message());
+            proto.is_ready = false;
+            LOGD(TAG, "Client: error message {}", ec.message());
         };
         if(blocking)
         {
@@ -599,6 +604,7 @@ public:
         }
         if(h.optional.event == Event::SessionStarted)
         {
+            proto.is_ready = true;
             connection->send(proto.SayHello());
         }
         if(h.optional.event == Event::ASRResponse)

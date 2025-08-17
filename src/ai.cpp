@@ -8,13 +8,15 @@
 #include <lcm/lcm.h>
 #include "log_.h"
 #include <mars_message/String.hpp>
+// #include "aixd.h"
+
+#define TAG "AIXD"
+#if 0
+
 #define SIMPLEWEB_USE_STANDALONE_ASIO 1
 #define ASIO_USE_TS_EXECUTOR_AS_DEFAULT  1
 #include "simpleweb/wss_client.hpp"
 #include "json.hpp"
-
-#define TAG "AIXD"
-#if 0
 
 #include "rksound.h"
 
@@ -308,7 +310,7 @@ struct HuoshanProto
 
     std::string StartConnect()
     {
-        LOGD(TAG, "HS: StartConnect");
+        LOGD(TAG, "Huoshan: StartConnect");
         auto d = genrate_header();
         d.append(to_bytesb(Event::StartConnect));
         std::string json = "{}";
@@ -600,7 +602,7 @@ int main(int argc, char *argv[])
     
     HuoshanProto huoshan(getCurrentTimestamp(), ai_configs.GetJson()["system"]["prompt"].dump(), ai_configs.GetJson()["system"]["hello"].get<std::string>());
     local_ai.LoadAction(ai_configs.GetJson());
-
+    LOGL(TAG);
     std::thread t([&huoshan]()
     {
         while(1)
@@ -617,6 +619,7 @@ int main(int argc, char *argv[])
             rksound_play_pcm(audio.data(), audio.size()/4);
         }
     });
+    LOGL(TAG);
 
     WssClient client("openspeech.bytedance.com/api/v3/realtime/dialogue", false);
     client.auto_reconnect = true;
@@ -693,6 +696,7 @@ int main(int argc, char *argv[])
     client.on_open = [&huoshan](shared_ptr<WssClient::Connection> connection)
     {
         cout << "Client: Opened connection" << endl;
+        LOGL(TAG);
         connection->send(huoshan.StartConnect());
     };
 
@@ -738,7 +742,7 @@ int main(int argc, char *argv[])
 }
 #else
 #include "HuoshanEngine.hpp"
-
+#include "aixd.h"
 int main(int argc, char *argv[])
 {
     lcm::LCM lcm;
@@ -752,6 +756,7 @@ int main(int argc, char *argv[])
     playDev.Open();
     RecordDev recordDev(8000, ma_format_s16, 320, 1);
     recordDev.Open();
+#if 0   
     AiConfigs ai_configs("localai.json");
     LOGL(TAG);
     LocalAi local_ai;
@@ -768,6 +773,11 @@ int main(int argc, char *argv[])
         engine.Poll();
         lcm.handleTimeout(10);
     }
+#else
+    AiSoundTask(lcm, playDev, recordDev);
+#endif
+    playDev.Close();
+    recordDev.Close();
     return 0;
 }
 #endif
